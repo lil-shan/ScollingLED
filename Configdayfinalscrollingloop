@@ -28,8 +28,6 @@ int scrollInterval = 10;
 int scrollStep = 1;
 int brightness = 50;
 
-int phaseShift = 0;
-
 void setup() {
   for (int i = 0; i < NUM_STRIPS; i++) {
     strips[i] = Adafruit_NeoPixel(LEDS_PER_STRIP, stripPins[i], NEO_GRB + NEO_KHZ800);
@@ -41,7 +39,7 @@ void setup() {
   
   textWidth = strlen(displayText) * 16;
   
-  offsetEven = LEDS_PER_STRIP + phaseShift;
+  offsetEven = LEDS_PER_STRIP;
 }
 
 void loop() {
@@ -210,8 +208,4 @@ void setScrollInterval(int newInterval) {
 
 void setScrollStep(int newStep) {
   scrollStep = max(newStep, 1);
-}
-
-void setPhaseShift(int newPhaseShift) {
-  phaseShift = newPhaseShift;
 }
