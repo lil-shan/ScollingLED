@@ -1,0 +1,351 @@
+#include <Adafruit_NeoPixel.h>
+#include <string.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <SPIFFS.h>
+#include "Font18x12.h"
+
+#define NUM_STRIPS       18
+#define LEDS_PER_STRIP   508
+
+#define FONT_WIDTH       12
+#define FONT_HEIGHT      18
+#define CHAR_SPACING     4
+#define CHAR_PITCH       (FONT_WIDTH + CHAR_SPACING)
+#define TEXT_SPACING     15
+
+const char* ssid = "LEDMatrixAP";
+const char* password = "matrix12345";
+
+WebServer server(80);
+
+int stripPins[NUM_STRIPS] = {18, 19, 21, 22, 23, 25, 26, 27, 5, 33, 13, 4, 12, 15, 16, 2, 14, 1};
+Adafruit_NeoPixel strips[NUM_STRIPS];
+bool displayBuffer[NUM_STRIPS][LEDS_PER_STRIP] = {0};
+
+char displayText[100] = "welcome to tinkerspace";
+int textWidth = 0;
+int offsetOdd = LEDS_PER_STRIP;
+int offsetEven = LEDS_PER_STRIP;
+
+uint8_t textColorR = 255, textColorG = 165, textColorB = 0;
+int scrollInterval = 10;
+int scrollStep = 1;
+int brightness = 50;
+
+unsigned long previousMillisOdd = 0;
+unsigned long previousMillisEven = 0;
+
+const char MAIN_page[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+    <title>LED Matrix Control</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f0f0f0; }
+        .container { max-width: 600px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h1 { color: #333; text-align: center; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; }
+        input[type="text"], input[type="number"] { width: 100%; padding: 8px; box-sizing: border-box; border: 1px solid #ddd; border-radius: 4px; }
+        input[type="color"] { width: 100%; height: 40px; }
+        button { background-color: #4CAF50; color: white; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; width: 100%; font-size: 16px; }
+        button:hover { background-color: #45a049; }
+        .status { margin-top: 15px; padding: 10px; background-color: #e7f3fe; border-left: 6px solid #2196F3; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>LED Matrix Control</h1>
+        
+        <div class="control-group">
+            <label for="text">Display Text:</label>
+            <input type="text" id="text" name="text" value="">
+        </div>
+        
+        <div class="control-group">
+            <label for="color">Text Color:</label>
+            <input type="color" id="color" name="color" value="#FFA500">
+        </div>
+        
+        <div class="control-group">
+            <label for="brightness">Brightness (0-255):</label>
+            <input type="number" id="brightness" name="brightness" min="0" max="255" value="50">
+        </div>
+        
+        <div class="control-group">
+            <label for="scrollSpeed">Scroll Interval (ms):</label>
+            <input type="number" id="scrollInterval" name="scrollInterval" min="0" value="10">
+        </div>
+        
+        <div class="control-group">
+            <label for="scrollStep">Scroll Step:</label>
+            <input type="number" id="scrollStep" name="scrollStep" min="1" value="1">
+        </div>
+        
+        <button onclick="updateSettings()">Update Settings</button>
+        
+        <div id="status" class="status" style="display:none;"></div>
+    </div>
+
+    <script>
+        window.onload = function() {
+            fetchCurrentSettings();
+        };
+
+        function fetchCurrentSettings() {
+            fetch('/settings')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('text').value = data.text;
+                    document.getElementById('color').value = rgbToHex(data.colorR, data.colorG, data.colorB);
+                    document.getElementById('brightness').value = data.brightness;
+                    document.getElementById('scrollInterval').value = data.scrollInterval;
+                    document.getElementById('scrollStep').value = data.scrollStep;
+                })
+                .catch(error => {
+                    showStatus('Error loading settings: ' + error.message, 'error');
+                });
+        }
+
+        function updateSettings() {
+            const text = document.getElementById('text').value;
+            const color = document.getElementById('color').value;
+            const brightness = document.getElementById('brightness').value;
+            const scrollInterval = document.getElementById('scrollInterval').value;
+            const scrollStep = document.getElementById('scrollStep').value;
+            
+            const rgb = hexToRgb(color);
+            
+            fetch('/update', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: `text=${encodeURIComponent(text)}&colorR=${rgb.r}&colorG=${rgb.g}&colorB=${rgb.b}&brightness=${brightness}&scrollInterval=${scrollInterval}&scrollStep=${scrollStep}`
+            })
+            .then(response => response.text())
+            .then(data => {
+                showStatus(data, 'success');
+            })
+            .catch(error => {
+                showStatus('Error updating settings: ' + error.message, 'error');
+            });
+        }
+
+        function showStatus(message, type) {
+            const statusDiv = document.getElementById('status');
+            statusDiv.textContent = message;
+            statusDiv.style.display = 'block';
+            statusDiv.style.backgroundColor = type === 'error' ? '#ffebee' : '#e7f3fe';
+            statusDiv.style.borderLeft = type === 'error' ? '6px solid #f44336' : '6px solid #2196F3';
+            
+            setTimeout(() => {
+                statusDiv.style.display = 'none';
+            }, 3000);
+        }
+
+        function hexToRgb(hex) {
+            const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+            return result ? {
+                r: parseInt(result[1], 16),
+                g: parseInt(result[2], 16),
+                b: parseInt(result[3], 16)
+            } : { r: 255, g: 165, b: 0 };
+        }
+
+        function rgbToHex(r, g, b) {
+            return "#" + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
+        }
+    </script>
+</body>
+</html>
+)rawliteral";
+
+void setup() {
+  Serial.begin(115200);
+  
+  for (int i = 0; i < NUM_STRIPS; i++) {
+    strips[i] = Adafruit_NeoPixel(LEDS_PER_STRIP, stripPins[i], NEO_GRB + NEO_KHZ800);
+    strips[i].begin();
+    strips[i].setBrightness(brightness);
+    strips[i].clear();
+    strips[i].show();
+  }
+  
+  textWidth = strlen(displayText) * CHAR_PITCH;
+  
+  if(!SPIFFS.begin(true)){
+    Serial.println("An Error occurred while mounting SPIFFS");
+    return;
+  }
+  
+  WiFi.softAP(ssid, password);
+  Serial.println("Access Point Started");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.softAPIP());
+  
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/settings", HTTP_GET, handleGetSettings);
+  server.on("/update", HTTP_POST, handleUpdate);
+  
+  server.begin();
+  Serial.println("HTTP server started");
+}
+
+void loop() {
+  server.handleClient();
+  
+  unsigned long currentMillis = millis();
+
+  if (currentMillis - previousMillisOdd >= scrollInterval) {
+    previousMillisOdd = currentMillis;
+    offsetOdd -= scrollStep;
+    if (offsetOdd <= -textWidth) offsetOdd = LEDS_PER_STRIP;
+    updateRows(true);
+  }
+
+  if (currentMillis - previousMillisEven >= scrollInterval) {
+    previousMillisEven = currentMillis;
+    offsetEven -= scrollStep;
+    if (offsetEven <= -textWidth) offsetEven = LEDS_PER_STRIP;
+    updateRows(false);
+  }
+}
+
+void handleRoot() {
+  server.send(200, "text/html", MAIN_page);
+}
+
+void handleGetSettings() {
+  String json = "{";
+  json += "\"text\":\"" + String(displayText) + "\",";
+  json += "\"colorR\":" + String(textColorR) + ",";
+  json += "\"colorG\":" + String(textColorG) + ",";
+  json += "\"colorB\":" + String(textColorB) + ",";
+  json += "\"brightness\":" + String(brightness) + ",";
+  json += "\"scrollInterval\":" + String(scrollInterval) + ",";
+  json += "\"scrollStep\":" + String(scrollStep);
+  json += "}";
+  
+  server.send(200, "application/json", json);
+}
+
+void handleUpdate() {
+  String newText = server.arg("text");
+  
+  if (newText.length() > 0 && newText != String(displayText)) {
+    memset(displayBuffer, 0, sizeof(displayBuffer));
+    
+    strncpy(displayText, newText.c_str(), sizeof(displayText) - 1);
+    displayText[sizeof(displayText) - 1] = '\0';
+    
+    textWidth = strlen(displayText) * CHAR_PITCH;
+    
+    offsetOdd = LEDS_PER_STRIP;
+    offsetEven = LEDS_PER_STRIP;
+  }
+  
+  if (server.hasArg("colorR") && server.hasArg("colorG") && server.hasArg("colorB")) {
+    textColorR = constrain(server.arg("colorR").toInt(), 0, 255);
+    textColorG = constrain(server.arg("colorG").toInt(), 0, 255);
+    textColorB = constrain(server.arg("colorB").toInt(), 0, 255);
+  }
+  
+  if (server.hasArg("brightness")) {
+    setBrightness(server.arg("brightness").toInt());
+  }
+  
+  if (server.hasArg("scrollInterval")) {
+    setScrollInterval(server.arg("scrollInterval").toInt());
+  }
+  
+  if (server.hasArg("scrollStep")) {
+    setScrollStep(server.arg("scrollStep").toInt());
+  }
+  
+  server.send(200, "text/plain", "Settings updated successfully");
+}
+
+void updateRows(bool isOdd) {
+  int startRow = isOdd ? 1 : 0;
+
+  for (int y = startRow; y < NUM_STRIPS; y += 2)
+    memset(displayBuffer[y], 0, LEDS_PER_STRIP * sizeof(bool));
+
+  int offset = isOdd ? offsetOdd : offsetEven;
+
+  for (int i = 0; i < strlen(displayText); i++)
+    drawCharacter(displayText[i], offset + i * CHAR_PITCH, isOdd);
+
+  int secondOffset = offset + textWidth + TEXT_SPACING;
+  if (secondOffset < LEDS_PER_STRIP + textWidth) {
+    for (int i = 0; i < strlen(displayText); i++)
+      drawCharacter(displayText[i], secondOffset + i * CHAR_PITCH, isOdd);
+  }
+
+  for (int y = startRow; y < NUM_STRIPS; y += 2) {
+    for (int x = 0; x < LEDS_PER_STRIP; x++) {
+      uint32_t color = displayBuffer[y][x] ? strips[y].Color(textColorR, textColorG, textColorB) : 0;
+      strips[y].setPixelColor(x, color);
+    }
+    strips[y].show();
+  }
+}
+
+void drawCharacter(char c, int xOffset, bool isOdd) {
+  int letterIndex = getLetterIndex(c);
+  if (letterIndex == -1) return;
+
+  for (int row = isOdd ? 1 : 0; row < NUM_STRIPS; row += 2) {
+    if (row >= FONT_HEIGHT) continue;
+
+    uint32_t rowData = font18x12[letterIndex][FONT_HEIGHT - 1 - row];
+    for (int col = 0; col < FONT_WIDTH; col++) {
+      int targetX = LEDS_PER_STRIP - 1 - (xOffset + col);
+      if (targetX >= 0 && targetX < LEDS_PER_STRIP) {
+        if (rowData & (1 << (FONT_WIDTH - 1 - col)))
+          displayBuffer[row][targetX] = true;
+      }
+    }
+  }
+}
+
+int getLetterIndex(char c) {
+  if (c >= 'A' && c <= 'Z') return c - 'A';
+  if (c >= 'a' && c <= 'z') return c - 'a';
+  if (c == ' ') return 26;
+  if (c >= '0' && c <= '9') return 27 + (c - '0');
+  switch (c) {
+    case '!': return 37;
+    case ',': return 38;
+    case '.': return 39;
+    case ':': return 40;
+    case ';': return 41;
+    case '?': return 42;
+    case '"': return 43;
+    case '\'': return 44;
+    case '#': return 45;
+    case '<': return 46;
+    case '>': return 47;
+    case '-': return 48;
+    default: return 26;
+  }
+}
+
+void setBrightness(int newBrightness) {
+  brightness = constrain(newBrightness, 0, 255);
+  for (int i = 0; i < NUM_STRIPS; i++) {
+    strips[i].setBrightness(brightness);
+    strips[i].show();
+  }
+}
+
+void setScrollInterval(int newInterval) {
+  scrollInterval = max(newInterval, 0);
+}
+
+void setScrollStep(int newStep) {
+  scrollStep = max(newStep, 1);
+}
